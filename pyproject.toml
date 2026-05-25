@@ -1,0 +1,11 @@
+[project]
+name = "lechess"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.4.6",
+    "tinygrad>=0.13.0",
+    "zstandard>=0.25.0",
+]
