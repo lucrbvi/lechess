@@ -155,6 +155,31 @@ class Predictor:
             z = blk(z, cond_emb, mask)
         return self.proj(self.norm(z))
 
+class MLP:
+    def __init__(self, in_dim: int, hidden_dim: int, out_dim: int):
+        self.fc1 = nn.Linear(in_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, out_dim)
+
+    def __call__(self, x: Tensor) -> Tensor:
+        return self.fc2(self.fc1(x).silu())
+
+class WorldModelHeads:
+    def __init__(self, dim: int = 192, hidden_dim: int | None = None,
+                 mtp_steps: int = 8, action_vocab: int = 64 * 64 * 7,
+                 reward_bins: int = 255):
+        hidden_dim = hidden_dim or dim * 2
+        self.mtp_steps = mtp_steps
+        self.action_vocab = action_vocab
+        self.reward_bins = reward_bins
+        self.policy = MLP(dim, hidden_dim, mtp_steps * action_vocab)
+        self.reward = MLP(dim, hidden_dim, mtp_steps * reward_bins)
+
+    def __call__(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        lead = x.shape[:-1]
+        action_logits = self.policy(x).reshape(*lead, self.mtp_steps, self.action_vocab)
+        reward_logits = self.reward(x).reshape(*lead, self.mtp_steps, self.reward_bins)
+        return action_logits, reward_logits
+
 class WorldModel:
     def __init__(self, img_size: int = 8, dim: int = 192, enc_depth: int = 12, pred_depth: int = 6,
                  enc_heads: int = 3, pred_heads: int = 16, proj_dim: int | None = None):
