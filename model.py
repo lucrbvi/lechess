@@ -57,11 +57,11 @@ class TransformerEncoderBlock:
 
 class VisionTransformerEncoder:
     def __init__(self, img_size: int = 8, dim: int = 256, depth: int = 6,
-                 n_heads: int = 8, mlp_ratio: float = 4.0, norm_eps: float = 1e-5):
+                 n_heads: int = 8, mlp_ratio: float = 4.0, vocab_size: int = 13, norm_eps: float = 1e-5):
         self.img_size = img_size
         self.n_patches = img_size * img_size
         self.dim = dim
-        self.patch_conv = nn.Conv2d(2, dim, kernel_size=1, stride=1, bias=False)
+        self.piece_embed = nn.Embedding(vocab_size, dim)
         self.cls_token = Tensor.zeros(1, 1, dim)
         self.freqs_cis = precompute_freqs_cis_2d(dim // n_heads, img_size, img_size)
         self.blocks = [TransformerEncoderBlock(dim, n_heads, mlp_ratio, norm_eps) for _ in range(depth)]
@@ -69,8 +69,7 @@ class VisionTransformerEncoder:
 
     def __call__(self, x: Tensor) -> tuple[Tensor, Tensor]:
         B = x.shape[0]
-        x = self.patch_conv(x.permute(0, 3, 1, 2))
-        x = x.reshape(B, self.dim, self.n_patches).transpose(1, 2)
+        x = self.piece_embed(x.cast('int32').reshape(B, -1))
         cls_tokens = self.cls_token.expand(B, -1, -1)
         x = cls_tokens.cat(x, dim=1)
         for blk in self.blocks:
@@ -162,6 +161,9 @@ class WorldModel:
         self.encoder = Encoder(img_size, dim, enc_depth, enc_heads, proj_dim=proj_dim)
         self.predictor = Predictor(dim, pred_depth, pred_heads, proj_dim=proj_dim)
 
-    def __call__(self, z: Tensor, actions: Tensor) -> Tensor:
-        cls, _ = self.encoder(z)
-        return self.predictor(cls, actions)
+    def __call__(self, observations: Tensor, actions: Tensor) -> Tensor:
+        B, T = observations.shape[:2]
+        flat_observations = observations.reshape(B * T, *observations.shape[2:])
+        cls, _ = self.encoder(flat_observations)
+        z = cls.reshape(B, T, -1)
+        return self.predictor(z[:, :-1], actions)
