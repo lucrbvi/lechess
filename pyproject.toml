@@ -8,7 +8,7 @@ dependencies = [
     "datasets>=4.4.1",
     "numpy>=2.4.6",
     "pyarrow>=22.0.0",
-    "python-chess>=1.999",
+    "rust-pgn-reader-python-binding>=4.0.0",
     "tinygrad>=0.13.0",
     "zstandard>=0.25.0",
 ]

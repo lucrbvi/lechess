@@ -55,9 +55,10 @@ class TransformerEncoderBlock:
         ffn = self.ffn_down(self.ffn_gate(h).silu() * self.ffn_up(h))
         return (x + ffn).contiguous()
 
-class VisionTransformerEncoder:
-    def __init__(self, img_size: int = 8, dim: int = 256, depth: int = 6,
-                 n_heads: int = 8, mlp_ratio: float = 4.0, vocab_size: int = 13, norm_eps: float = 1e-5):
+class Encoder:
+    def __init__(self, img_size: int = 8, dim: int = 192, depth: int = 12,
+                 n_heads: int = 3, proj_dim: int | None = None, mlp_ratio: float = 4.0,
+                 vocab_size: int = 13, norm_eps: float = 1e-5):
         self.img_size = img_size
         self.n_patches = img_size * img_size
         self.dim = dim
@@ -66,6 +67,7 @@ class VisionTransformerEncoder:
         self.freqs_cis = precompute_freqs_cis_2d(dim // n_heads, img_size, img_size)
         self.blocks = [TransformerEncoderBlock(dim, n_heads, mlp_ratio, norm_eps) for _ in range(depth)]
         self.norm = nn.RMSNorm(dim, norm_eps)
+        self.proj = ProjectionHead(dim, proj_dim or dim)
 
     def __call__(self, x: Tensor) -> tuple[Tensor, Tensor]:
         B = x.shape[0]
@@ -75,7 +77,7 @@ class VisionTransformerEncoder:
         for blk in self.blocks:
             x = blk(x, self.freqs_cis)
         x = self.norm(x)
-        return x[:, 0, :], x[:, 1:, :]
+        return self.proj(x[:, 0, :]), x[:, 1:, :]
 
 class ProjectionHead:
     def __init__(self, in_dim: int, out_dim: int | None = None):
@@ -89,16 +91,6 @@ class ProjectionHead:
         x = x.reshape(-1, x.shape[-1])
         x = self.bn(x)
         return x.reshape(*lead, -1)
-
-class Encoder:
-    def __init__(self, img_size: int = 8, dim: int = 192, depth: int = 12,
-                 n_heads: int = 3, proj_dim: int | None = None, **kwargs):
-        self.vit = VisionTransformerEncoder(img_size, dim, depth, n_heads, **kwargs)
-        self.proj = ProjectionHead(dim, proj_dim or dim)
-
-    def __call__(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        cls, patches = self.vit(x)
-        return self.proj(cls), patches
 
 class AdaLNPredictorBlock:
     def __init__(self, dim: int, n_heads: int, cond_dim: int, mlp_ratio: float = 4.0,
@@ -118,50 +110,29 @@ class AdaLNPredictorBlock:
         shift_msa, scale_msa, gate_msa, shift_ffn, scale_ffn, gate_ffn = \
             self.adaln(cond_emb).chunk(6, dim=-1)
 
-        x = x + gate_msa * self.attn(self._modulate(self.norm1(x), shift_msa, scale_msa), attn_mask=attn_mask)
+        x = x + gate_msa * self.attn(self.norm1(x) * (1 + scale_msa) + shift_msa, attn_mask=attn_mask)
 
-        h = self._modulate(self.norm2(x), shift_ffn, scale_ffn)
+        h = self.norm2(x) * (1 + scale_ffn) + shift_ffn
         ffn = self.ffn_down(self.ffn_gate(h).silu() * self.ffn_up(h))
         return (x + gate_ffn * ffn).contiguous()
-
-    @staticmethod
-    def _modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
-        return x * (1 + scale) + shift
-
-class ActionEmbedder:
-    def __init__(self, dim: int):
-        self.pair = nn.Embedding(64 * 64, dim)
-        self.promo = nn.Embedding(7, dim)
-
-    def __call__(self, actions: Tensor) -> Tensor:
-        f = actions[..., 0].cast('int32')
-        t = actions[..., 1].cast('int32')
-        p = actions[..., 2].cast('int32')
-        return self.pair(f * 64 + t) + self.promo(p)
 
 class Predictor:
     def __init__(self, dim: int = 192, depth: int = 6, n_heads: int = 16,
                  mlp_ratio: float = 4.0, dropout: float = 0.1, proj_dim: int | None = None):
-        self.action_embed = ActionEmbedder(dim)
+        self.action_pair = nn.Embedding(64 * 64, dim)
+        self.action_promo = nn.Embedding(7, dim)
         self.blocks = [AdaLNPredictorBlock(dim, n_heads, dim, mlp_ratio, dropout) for _ in range(depth)]
         self.norm = nn.RMSNorm(dim)
         self.proj = ProjectionHead(dim, proj_dim or dim)
 
     def __call__(self, z: Tensor, actions: Tensor) -> Tensor:
         B, L, D = z.shape
-        cond_emb = self.action_embed(actions)
+        cond_emb = self.action_pair(actions[..., 0].cast('int32') * 64 + actions[..., 1].cast('int32')) + \
+            self.action_promo(actions[..., 2].cast('int32'))
         mask = Tensor.full((1, 1, L, L), float("-inf"), dtype=z.dtype, device=z.device).triu(1)
         for blk in self.blocks:
             z = blk(z, cond_emb, mask)
         return self.proj(self.norm(z))
-
-class MLP:
-    def __init__(self, in_dim: int, hidden_dim: int, out_dim: int):
-        self.fc1 = nn.Linear(in_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, out_dim)
-
-    def __call__(self, x: Tensor) -> Tensor:
-        return self.fc2(self.fc1(x).silu())
 
 class WorldModelHeads:
     def __init__(self, dim: int = 192, hidden_dim: int | None = None,
@@ -171,24 +142,13 @@ class WorldModelHeads:
         self.mtp_steps = mtp_steps
         self.action_vocab = action_vocab
         self.reward_bins = reward_bins
-        self.policy = MLP(dim, hidden_dim, mtp_steps * action_vocab)
-        self.reward = MLP(dim, hidden_dim, mtp_steps * reward_bins)
+        self.policy_fc1 = nn.Linear(dim, hidden_dim)
+        self.policy_fc2 = nn.Linear(hidden_dim, mtp_steps * action_vocab)
+        self.reward_fc1 = nn.Linear(dim, hidden_dim)
+        self.reward_fc2 = nn.Linear(hidden_dim, mtp_steps * reward_bins)
 
     def __call__(self, x: Tensor) -> tuple[Tensor, Tensor]:
         lead = x.shape[:-1]
-        action_logits = self.policy(x).reshape(*lead, self.mtp_steps, self.action_vocab)
-        reward_logits = self.reward(x).reshape(*lead, self.mtp_steps, self.reward_bins)
+        action_logits = self.policy_fc2(self.policy_fc1(x).silu()).reshape(*lead, self.mtp_steps, self.action_vocab)
+        reward_logits = self.reward_fc2(self.reward_fc1(x).silu()).reshape(*lead, self.mtp_steps, self.reward_bins)
         return action_logits, reward_logits
-
-class WorldModel:
-    def __init__(self, img_size: int = 8, dim: int = 192, enc_depth: int = 12, pred_depth: int = 6,
-                 enc_heads: int = 3, pred_heads: int = 16, proj_dim: int | None = None):
-        self.encoder = Encoder(img_size, dim, enc_depth, enc_heads, proj_dim=proj_dim)
-        self.predictor = Predictor(dim, pred_depth, pred_heads, proj_dim=proj_dim)
-
-    def __call__(self, observations: Tensor, actions: Tensor) -> Tensor:
-        B, T = observations.shape[:2]
-        flat_observations = observations.reshape(B * T, *observations.shape[2:])
-        cls, _ = self.encoder(flat_observations)
-        z = cls.reshape(B, T, -1)
-        return self.predictor(z[:, :-1], actions)
