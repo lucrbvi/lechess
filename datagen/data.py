@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import sys
 import time
+from urllib.request import urlopen
 
 from huggingface_hub import HfApi
 import numpy as np
@@ -79,10 +80,9 @@ def boards_from_moves(moves) -> np.ndarray:
 
 def _pgn_strings(path: str) -> Iterator[str]:
     current = []
-    f = (
-        io.TextIOWrapper(zstd.ZstdDecompressor().stream_reader(open(path, 'rb')), encoding='utf-8', errors='replace')
-        if path.endswith('.zst') else open(path, encoding='utf-8', errors='replace')
-    )
+    raw = urlopen(path, timeout=300) if path.startswith(('http://', 'https://')) else open(path, 'rb')
+    stream = zstd.ZstdDecompressor().stream_reader(raw) if path.endswith('.zst') else raw
+    f = io.TextIOWrapper(stream, encoding='utf-8', errors='replace')
 
     with f:
         for line in f:
@@ -427,14 +427,13 @@ def push_datasets_to_hub(games_dir: str | Path, stockfish_dir: str | Path | None
     for path, repo in targets:
         LOGGER.info('pushing dataset repo=%s path=%s', repo, path)
         api.create_repo(repo, repo_type='dataset', private=private, exist_ok=True)
-        api.upload_folder(
+        api.upload_large_folder(
             repo_id=repo,
             repo_type='dataset',
             folder_path=path,
             revision=revision,
             allow_patterns=['train/*.parquet', 'test/*.parquet'],
-            delete_patterns=['train/*.parquet', 'test/*.parquet'],
-            commit_message='Upload lechess dataset shards',
+            private=private,
         )
         LOGGER.info('pushed dataset repo=%s', repo)
 

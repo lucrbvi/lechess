@@ -11,7 +11,7 @@ from tinygrad import Tensor, nn
 from tinygrad.engine.jit import TinyJit
 from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict, safe_load, safe_save
 
-from data import boards_from_moves
+from datagen.data import boards_from_moves
 from model import Encoder, Predictor, WorldModelHeads
 
 LOGGER = logging.getLogger(__name__)

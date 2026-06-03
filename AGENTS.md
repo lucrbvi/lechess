@@ -11,13 +11,3 @@
 10. When optimizing, preserve a simple data flow that can be read from top to bottom.
 11. Avoid bloat: do not introduce abstractions, helpers, comments, types, options, or files that are not pulling their weight.
 12. After finishing code changes, run `uvx ruff check .` and `uvx ty check .` to catch linting and typing issues.
-
-
-2017-2026 only
-Ban:
-- Nov 2023
-- Dec 2022
-- March 2021
-- Feb 2021
-- Dec 2020
-- July 2020
