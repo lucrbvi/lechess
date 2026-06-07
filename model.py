@@ -175,8 +175,7 @@ class Predictor:
 
 class WorldModelHeads:
     def __init__(self, dim: int = 192, hidden_dim: int | None = None,
-                 mtp_steps: int = 8, action_vocab: int = 64 * 64 * 7,
-                 reward_bins: int = 255, action_depth: int = 2,
+                 mtp_steps: int = 8, reward_bins: int = 255, action_depth: int = 2,
                  reward_depth: int = 2, action_hidden_dim: int | None = None,
                  reward_hidden_dim: int | None = None):
         assert action_depth >= 1
@@ -187,26 +186,43 @@ class WorldModelHeads:
         reward_hidden_dim = reward_hidden_dim or hidden_dim
 
         self.mtp_steps = mtp_steps
-        self.action_vocab = action_vocab
         self.reward_bins = reward_bins
+        self.from_embed = nn.Embedding(64, action_hidden_dim)
+        self.to_embed = nn.Embedding(64, action_hidden_dim)
 
-        action_dims = [dim] + [action_hidden_dim] * (action_depth - 1) + [mtp_steps * action_vocab]
+        action_dims = [dim] + [action_hidden_dim] * action_depth
         reward_dims = [dim] + [reward_hidden_dim] * (reward_depth - 1) + [mtp_steps * reward_bins]
 
         self.action_layers = [nn.Linear(action_dims[i], action_dims[i + 1]) for i in range(action_depth)]
+        self.from_heads = [nn.Linear(action_hidden_dim, 64) for _ in range(mtp_steps)]
+        self.to_heads = [nn.Linear(action_hidden_dim, 64) for _ in range(mtp_steps)]
+        self.promo_heads = [nn.Linear(action_hidden_dim, 7) for _ in range(mtp_steps)]
         self.reward_layers = [nn.Linear(reward_dims[i], reward_dims[i + 1]) for i in range(reward_depth)]
 
-    def __call__(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        lead = x.shape[:-1]
+    def action_hidden(self, x: Tensor) -> Tensor:
+        for layer in self.action_layers:
+            x = layer(x).silu()
 
-        action = x
-        for layer in self.action_layers[:-1]:
-            action = layer(action).silu()
-        action_logits = self.action_layers[-1](action).reshape(*lead, self.mtp_steps, self.action_vocab)
+        return x
+
+    def action_logits(self, h: Tensor, actions: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        from_logits, to_logits, promo_logits = [], [], []
+
+        for i in range(self.mtp_steps):
+            frm = actions[:, :, i, 0].cast('int32')
+            to = actions[:, :, i, 1].cast('int32')
+            from_logits.append(self.from_heads[i](h))
+            to_logits.append(self.to_heads[i](h + self.from_embed(frm)))
+            promo_logits.append(self.promo_heads[i](h + self.from_embed(frm) + self.to_embed(to)))
+
+        return Tensor.stack(*from_logits, dim=2), Tensor.stack(*to_logits, dim=2), Tensor.stack(*promo_logits, dim=2)
+
+    def __call__(self, x: Tensor, actions: Tensor) -> tuple[tuple[Tensor, Tensor, Tensor], Tensor]:
+        lead = x.shape[:-1]
 
         reward = x
         for layer in self.reward_layers[:-1]:
             reward = layer(reward).silu()
         reward_logits = self.reward_layers[-1](reward).reshape(*lead, self.mtp_steps, self.reward_bins)
 
-        return action_logits, reward_logits
+        return self.action_logits(self.action_hidden(x), actions), reward_logits
