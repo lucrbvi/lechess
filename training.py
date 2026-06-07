@@ -25,15 +25,6 @@ DEFAULT_TRACKIO_SPACE = 'lechess-trackio'
 STDOUT_WARMUP_STEPS = 100
 STDOUT_EVERY = 2000
 
-def run_name(args: argparse.Namespace) -> str:
-    if args.trackio_run:
-        return args.trackio_run
-
-    return f'{args.phase}-{datetime.now().strftime("%Y%m%d-%H%M%S")}'
-
-def trackio_space(args: argparse.Namespace) -> str | None:
-    return f'{args.hf_user}/{DEFAULT_TRACKIO_SPACE}' if args.hf_user else None
-
 def encode(encoder, boards: Tensor) -> Tensor:
     B, T = boards.shape[:2]
     cls, _ = encoder(boards.reshape(B * T, *boards.shape[2:]))
@@ -140,11 +131,6 @@ def batches(dataset, batch_size: int, window_size: int, phase: str, device: str 
                 yield out
                 batch = []
 
-def checkpoint_metadata(path: str | Path) -> dict[str, Any]:
-    _, _, metadata = safe_load_metadata(path)
-
-    return metadata.get('__metadata__', {})
-
 def checkpoint(path: str | Path, objects: dict[str, object], optimizer=None, step: int | None = None,
                metrics: dict[str, float] | None = None) -> dict[str, Any] | None:
     if step is None:
@@ -162,7 +148,9 @@ def checkpoint(path: str | Path, objects: dict[str, object], optimizer=None, ste
             if weights:
                 load_state_dict(optimizer, weights, strict=False, verbose=False)
 
-        return checkpoint_metadata(path)
+        _, _, metadata = safe_load_metadata(path)
+
+        return metadata.get('__metadata__', {})
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -178,27 +166,6 @@ def checkpoint(path: str | Path, objects: dict[str, object], optimizer=None, ste
     safe_save(state, str(path), metadata={'step': step, **(metrics or {})})
 
     return None
-
-def start_tracking(args: argparse.Namespace) -> bool:
-    config = {
-        key: value for key, value in vars(args).items()
-        if isinstance(value, str | int | float | bool) or value is None
-    }
-
-    trackio.init(
-        project=DEFAULT_TRACKIO_PROJECT,
-        name=run_name(args),
-        group=args.phase,
-        space_id=trackio_space(args),
-        config=config,
-        resume='allow',
-        auto_log_gpu=False,
-    )
-
-    return True
-
-def should_log_stdout(step: int) -> bool:
-    return step <= STDOUT_WARMUP_STEPS or step % STDOUT_EVERY == 0
 
 def run_eval(phase: str, dataset, encoder, predictor, heads, args) -> dict[str, float]:
     window = args.context_window if phase == 'world' else args.mtp_steps
@@ -228,7 +195,19 @@ def run_eval(phase: str, dataset, encoder, predictor, heads, args) -> dict[str, 
 def train(args: argparse.Namespace) -> dict[str, float]:
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    tracking = start_tracking(args)
+    trackio.init(
+        project=DEFAULT_TRACKIO_PROJECT,
+        name=args.trackio_run or f'{args.phase}-{datetime.now().strftime("%Y%m%d-%H%M%S")}',
+        group=args.phase,
+        space_id=f'{args.hf_user}/{DEFAULT_TRACKIO_SPACE}' if args.hf_user else None,
+        config={
+            key: value for key, value in vars(args).items()
+            if isinstance(value, str | int | float | bool) or value is None
+        },
+        resume='allow',
+        auto_log_gpu=False,
+        private=False, # yay! open :3
+    )
 
     logging.basicConfig(
         level=logging.INFO,
@@ -349,41 +328,35 @@ def train(args: argparse.Namespace) -> dict[str, float]:
 
             steps_per_sec = local_step / (time.perf_counter() - started)
 
-            if tracking:
-                trackio.log({
-                    **{f'train/{key}': value for key, value in metrics.items()},
-                    'train/steps_per_sec': steps_per_sec,
-                }, step=n)
+            trackio.log({
+                **{f'train/{key}': value for key, value in metrics.items()},
+                'train/steps_per_sec': steps_per_sec,
+            }, step=n)
 
-            if should_log_stdout(n):
+            stdout = n <= STDOUT_WARMUP_STEPS or n % STDOUT_EVERY == 0
+
+            if stdout:
                 LOGGER.info('phase=%s step=%d/%d metrics=%s steps_per_sec=%.2f',
                             args.phase, n, start_step + args.steps, metrics, steps_per_sec)
 
             if eval_dataset is not None and n % args.eval_every == 0:
                 eval_metrics = run_eval(args.phase, eval_dataset, encoder, predictor, heads, args)
 
-                if should_log_stdout(n):
+                if stdout:
                     LOGGER.info('eval phase=%s step=%d metrics=%s', args.phase, n, eval_metrics)
 
-                if tracking:
-                    trackio.log({f'eval/{key}': value for key, value in eval_metrics.items()}, step=n)
+                trackio.log({f'eval/{key}': value for key, value in eval_metrics.items()}, step=n)
 
             if n % args.checkpoint_every == 0:
                 checkpoint(checkpoint_dir / f'step_{n}.safetensors', objects, optimizer, n, metrics)
 
-                if tracking:
-                    trackio.log({'checkpoint/step': n}, step=n)
-
             if local_step >= args.steps:
                 checkpoint(checkpoint_dir / 'last.safetensors', objects, optimizer, n, metrics)
-
-                if tracking:
-                    trackio.log({f'final/{key}': value for key, value in metrics.items()}, step=n)
+                trackio.log({f'final/{key}': value for key, value in metrics.items()}, step=n)
 
                 return metrics
     finally:
-        if tracking:
-            trackio.finish()
+        trackio.finish()
 
     raise ValueError('training dataset produced no full batches')
 

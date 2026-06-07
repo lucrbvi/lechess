@@ -13,6 +13,7 @@ PIECE_TO_PROMO = {
     chess.ROOK: 4,
     chess.QUEEN: 5,
 }
+PROMO_TO_PIECE = {value: piece for piece, value in PIECE_TO_PROMO.items()}
 
 def board_array(board: chess.Board) -> np.ndarray:
     out = np.zeros((8, 8), dtype=np.int8)
@@ -33,21 +34,6 @@ def pick(logits: np.ndarray, legal: set[int], temperature: float) -> int:
     probs = probs / probs.sum()
 
     return int(np.random.choice(len(probs), p=probs))
-
-def move_from_parts(board: chess.Board, frm: int, to: int, promo: int) -> chess.Move:
-    promotion = None
-
-    for piece_type, value in PIECE_TO_PROMO.items():
-        if promo == value:
-            promotion = piece_type
-            break
-
-    move = chess.Move(frm, to, promotion)
-
-    if move in board.legal_moves:
-        return move
-
-    return chess.Move(frm, to)
 
 def legal_promos(board: chess.Board, frm: int, to: int) -> set[int]:
     values = {
@@ -78,7 +64,7 @@ def choose_move(board: chess.Board, encoder, heads, device: str | None, temperat
     promo_logits = heads.promo_heads[0](h + heads.from_embed(frm_tensor) + heads.to_embed(to_tensor)).realize().numpy()[0, 0]
     promo = pick(promo_logits, promos, temperature)
 
-    move = move_from_parts(board, frm, to, promo)
+    move = chess.Move(frm, to, PROMO_TO_PIECE.get(promo))
     assert move in board.legal_moves
 
     return move

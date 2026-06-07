@@ -73,10 +73,6 @@ class Encoder:
                  n_heads: int = 3, mlp_ratio: float = 4.0, proj_dim: int | None = None,
                  proj_depth: int = 1, proj_hidden_dim: int | None = None,
                  vocab_size: int = 13, norm_eps: float = 1e-5):
-        self.img_size = img_size
-        self.n_patches = img_size * img_size
-        self.dim = dim
-
         self.piece_embed = nn.Embedding(vocab_size, dim)
         self.cls_token = Tensor.zeros(1, 1, dim)
         self.freqs_cis = precompute_freqs_cis_2d(dim // n_heads, img_size, img_size)

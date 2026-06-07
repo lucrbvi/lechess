@@ -174,30 +174,25 @@ def _parse_pgn_records(path: str, test_ratio: float = 0.05,
                        parse_threads: int | None = None) -> Iterator[tuple[str, dict]]:
     batch = []
 
-    for text in _pgn_strings(path):
-        batch.append(text)
-
-        if len(batch) >= 4096:
-            for text, game in zip(batch, parse_games_from_strings(
-                batch, num_threads=parse_threads, store_comments=False, store_legal_moves=False
-            )):
-                record = _record(game, text)
-
-                if record is not None:
-                    value = int(record['game_hash'], 16) / 2 ** 64
-                    yield 'test' if value < test_ratio else 'train', record
-
-            batch = []
-
-    if batch:
-        for text, game in zip(batch, parse_games_from_strings(
-            batch, num_threads=parse_threads, store_comments=False, store_legal_moves=False
+    def records(texts):
+        for text, game in zip(texts, parse_games_from_strings(
+            texts, num_threads=parse_threads, store_comments=False, store_legal_moves=False
         )):
             record = _record(game, text)
 
             if record is not None:
                 value = int(record['game_hash'], 16) / 2 ** 64
                 yield 'test' if value < test_ratio else 'train', record
+
+    for text in _pgn_strings(path):
+        batch.append(text)
+
+        if len(batch) >= 4096:
+            yield from records(batch)
+            batch = []
+
+    if batch:
+        yield from records(batch)
 
 def _write_shard(rows: list[dict], out_dir: Path, split: str, source_id: str, shard_id: int,
                  include_text_meta: bool, include_stockfish: bool = False) -> Path:
